@@ -1,0 +1,174 @@
+
+
+
+
+# ########                Assays of RNA-Seq data for HEK293 cells with knockdown of pyruvate kinase
+
+
+
+
+
+
+# RNA-Seq data were download from NIH . Total 6 NGS sequences, including 3 for control and 3 for knockdown of pyruvate kinase.
+
+# RNA-Seq IDs are: "SRR24971804", "SRR24971805", "SRR24971806", "SRR24971807", "SRR24971808", "SRR24971809"
+
+# R script-1 for bam files produced
+
+Sequence_ID  <- commandArgs(trailingOnly = TRUE)  
+
+
+execute <- function(x, outputfile = NA, intern = FALSE, quitOnError = FALSE){
+  if(!is.na(outputfile) && file.exists(outputfile)){
+    cat("Output for step exists, skipping this step\n");
+    invisible("")
+  }
+  cat("RunningAt...:   ", x, "\n"); RunningEnding <- system(x, intern = intern); cat(">>>>", RunningEnding[1], "\n")
+  if(RunningEnding[1] >= 1){ 
+    cat("Error external process did not finish\n\n");
+    if(quitOnError) q("no")
+  }
+}
+
+
+inputfolder <- "/home/gregwang/project_HEK/data_HEK/raw_data"
+input.base <- Sequence_ID[1]
+outputfolder <- paste0("/home/gregwang/project_HEK/data_HEK/output/", input.base, ".aln")
+genome_reference.path <- "/home/gregwang/project_HEK/genome_reference/hisat2_index/grch38/genome"
+ref.fa.gz <- "/home/gregwang/project_HEK/genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz"
+ref.snps <- "/home/gregwang/project_HEK/genome_reference/homo_sapiens_somatic.vcf.gz"
+
+
+# Create an output folder
+if(!file.exists(inputfolder)){ dir.create(inputfolder, recursive = TRUE) }
+if(!file.exists(outputfolder)){ dir.create(outputfolder, recursive = TRUE) }
+
+# STEP 1 - SRA Download and Compress
+
+setwd (inputfolder)
+
+
+execute(paste0("fasterq-dump -p --split-files ", input.base), paste0(input.base, "_1.fastq"))
+execute (paste0 ( "bgzip " , input.base, "_1.fastq " ) , paste0 (input.base,"_1.fastq.gz"))
+execute(paste0 ( "bgzip ",  input.base, "_2.fastq " ), paste0(input.base, "_2.fastq.gz"))
+
+
+# STEP 2 - READ Trimming
+trim.files  <- c(
+                  paste0(inputfolder, "/", input.base,"_1.fastq.gz"),
+                  paste0(inputfolder, "/", input.base,"_2.fastq.gz"),
+                  paste0(outputfolder, "/", input.base,"_1.P.fastq.gz"),
+                  paste0(outputfolder, "/", input.base,"_1.U.fastq.gz"),
+                  paste0(outputfolder, "/", input.base,"_2.P.fastq.gz"),
+                  paste0(outputfolder, "/", input.base,"_2.U.fastq.gz")
+                )
+trim.path <- "/home/gregwang/software/Trimmomatic"
+trim.exec <- paste0("java -jar ", trim.path, "/dist/jar/trimmomatic-0.40-rc1.jar")
+trim.opts <- paste0("ILLUMINACLIP:",trim.path,"/adapters/TruSeq3-PE-2.fa:2:30:10")  # adapters/TruSeq3 needs verifying
+trim.opts <- paste0(trim.opts, " LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36")
+trim.cmd  <- paste0(trim.exec, " PE ", paste0(trim.files, collapse=" "), " ", trim.opts)
+
+execute(trim.cmd, trim.files[3])
+
+# step3 aligns by hisat2
+
+
+hisat2.outbase <- paste0(outputfolder, "/", input.base)
+hisat2.sam <- paste0(hisat2.outbase, ".sam")
+hisat2.bam <- paste0(hisat2.outbase, ".bam")
+
+hisat2.opts <- paste0(" -p 2 --dta -x ", genome_reference.path)  
+hisat2.filesIn <- c(trim.files[3], trim.files[5])  
+
+
+hisat2.cmd <- paste0("hisat2 ", hisat2.opts, " -1 ", hisat2.filesIn[1], " -2 ", hisat2.filesIn[2], " -S ", hisat2.sam)  # Corrected the full command
+
+
+execute ( hisat2.cmd, hisat2.sam)
+
+
+
+# step 4-- create hisat2.bam by samtools sort
+
+
+execute(paste0("samtools sort ", hisat2.sam, " -o ", hisat2.bam), paste0(hisat2.outbase, ".bam"))
+
+# STEP 4.1 - Create a samtools index
+
+execute(paste0("samtools index ", hisat2.bam), paste0(hisat2.bam, ".bai"))
+
+# STEP 4.2 - Create mapping and coverage statistics
+execute(paste0("samtools flagstats ", hisat2.bam))
+execute(paste0("samtools coverage ", hisat2.bam))
+
+
+#STEP 5 - Remove /mark duplicate reads by GATK tools
+p.bam <- paste0(hisat2.outbase, ".RD.bam")
+metrics.out <- paste0(hisat2.outbase, "_metrics.txt")
+p.bam.bai <- paste0(p.bam, ".bai")
+
+gatk.exec <- "java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar"
+p.in <- paste0("-I ", hisat2.bam)
+p.out <- paste0("-O ", p.bam, " -M ", metrics.out)
+p.opts <- paste0("--REMOVE_DUPLICATES true")
+p.cmd <- paste0(gatk.exec, " MarkDuplicates ", p.opts," ", p.in, " ", p.out)
+
+execute(p.cmd, p.bam)
+
+# STEP 5.1 - Create a samtools index
+execute(paste0("samtools index ", p.bam), paste0(p.bam, ".bai"))
+# STEP 5.2 - Create mapping and coverage statistics
+execute(paste0("samtools flagstats ", p.bam))
+execute(paste0("samtools coverage ", p.bam))
+
+
+
+# STEP 6 - Add read group  and sample run, library, and name
+gatk.exec <- "java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar"
+rg.bam <- paste0(hisat2.outbase, ".RG.RD.bam")
+
+rg.opts <- paste0("-PL ILLUMINA -PU run -LB ", gsub("SRR", "", input.base), " -SM ", input.base)
+p.cmd <- paste0(gatk.exec, " AddOrReplaceReadGroups -I ", p.bam, " -O ", rg.bam, " ", rg.opts)
+execute(p.cmd)
+
+# STEP 6.1 - Create a samtools index
+
+execute(paste0("samtools index ", rg.bam), paste0(rg.bam, ".bai"))
+
+# STEP 7 - GATK for BaseRecalibrator and ApplyBQSR
+gatk.exec <- "java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar"
+gatk.opts <- paste0("-R ", ref.fa.gz, " --known-sites ", ref.snps)
+
+
+# STEP 7.1 - GATK BaseRecalibrator
+gatk.cov1 <- paste0(hisat2.outbase, "_cov1.txt")
+gatk.cmd  <- paste0(gatk.exec, " BaseRecalibrator ", gatk.opts, " -I ", rg.bam, " -O ", gatk.cov1)
+execute(gatk.cmd, gatk.cov1)
+
+# STEP 7.2 - GATK ApplyBQSR
+recal.bam <- paste0(hisat2.outbase, ".RC.RG.RD.bam")
+gatk.cmd  <- paste0(gatk.exec, " ApplyBQSR -R ", ref.fa.gz, " -bqsr ", gatk.cov1, " -I ", rg.bam, " -O ", recal.bam)
+execute(gatk.cmd, recal.bam)
+
+
+# STEP 7.3 - GATK BaseRecalibrator
+gatk.cov2 <- paste0(hisat2.outbase, "_cov2.txt")
+gatk.cmd  <- paste0(gatk.exec, " BaseRecalibrator ", gatk.opts, " -I ", recal.bam, " -O ", gatk.cov2)
+execute(gatk.cmd, gatk.cov2)
+
+
+# STEP 7.4 - GATK AnalyzeCovariates
+recal.plot <- paste0(hisat2.outbase, "AnalyzeCovariates.pdf")
+
+gatk.cmd  <- paste0(gatk.exec, " AnalyzeCovariates -before ", gatk.cov1, " -after ", gatk.cov2, "  -plots ", recal.plot)
+execute(gatk.cmd)
+
+
+# STEP 8 - Index the recalibrated bam files
+execute(paste0("samtools index ", recal.bam), paste0(recal.bam, ".bai"))
+
+# STEP 8.1 - Create mapping and coverage statistics
+execute(paste0("samtools flagstats ", recal.bam))
+execute(paste0("samtools coverage ", recal.bam))
+
+q("no")
