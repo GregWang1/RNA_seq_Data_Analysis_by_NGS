@@ -1,0 +1,246 @@
+
+
+# Assays of RNA-Seq data for HEK293 cells with knockdown of pyruvate kinase
+
+
+# Setting current working directory
+
+"C:/Shared-copying files/Assayfor HEK data/"
+
+# Loading packages
+
+library("GenomicAlignments")
+library("GenomicFeatures")
+library("Rsamtools")
+library("preprocessCore")
+library("vioplot")
+library("RColorBrewer")
+library("biomaRt")
+library("ggplot2")
+library("DESeq")
+library("org.Hs.eg.db")
+library("ComplexHeatmap")
+
+
+# Preparing data base of  TxDb (transcripts)
+
+db <- makeTxDbFromGFF ("Homo_sapiens.GRCh38.109.gtf", format= "gtf")
+
+exons <- exonsBy(db, by = "gene")
+
+exons[1:10,]
+gene.lengths <- lapply( exons, function(x){ sum(width(reduce(x)))} )
+	 
+gene.lengths[1:10]
+	 
+
+# Loading samples and files
+	 
+samples <-c("SRR24971804", "SRR24971805", "SRR24971806", "SRR24971807", "SRR24971808", "SRR24971809")
+				 
+names(samples) <-c( "Ctr-1", "Ctr-2", "Ctr-3", "KO-1", "KO-2", "KO-3")
+						 
+files <-c()
+for (i in samples){
+     fp <- paste0 ( i, ".RC.RG.RD.bam")
+	 if (file.exists(fp)) {files <-c (files, fp)}
+}
+
+
+# Loading the BAM files
+
+bams <- BamFileList( files, yieldSize =100000, asMates =TRUE)
+
+
+# Overlap BAM reads and genes
+
+overlap <- summarizeOverlaps(exons, bams, 
+                             mode = "Union",
+							 singleEnd =FALSE,
+							 ignore.strand = TRUE,
+							 fragments = TRUE)
+
+							 
+# Extract the raw reads per gene
+
+readcount <- assay(overlap) 
+
+readcount [1:10,]
+colnames(readcount) <- gsub(".RC.RG.RD.bam", " ", colnames(readcount))
+write.table (readcount, "readcount.raw.txt", sep= "\t", quote =FALSE)
+
+write.csv (readcount, "readcount.rawBy.csv", quote =FALSE)
+
+apply(readcount, 2, sum)
+
+
+# Prepare for RPKM ( reads per kilobase of exon per million reads mapped)
+
+N <- apply( readcount, 2, sum)
+
+n <- 1
+RPKM <- t(apply(readcount, 1, function(C){
+           L <- as.numeric(gene.lengths[n]) # from database to see that the gene.lengths are list of various genes, n indicates genes, from binding overlap to see that n is row of the readcount figure
+		   RPKM  <- (10^9 * C)/(N * L)
+		   n <<- n+1
+		   return (round(RPKM, d=1))
+}))
+
+RPKM [1: 10,]
+
+cor(RPKM[,1], readcount[,1])
+plot(RPKM[,1], readcount[,1])
+
+write.table( RPKM, " RPKM.txt", sep = "\t", quote = FALSE)
+
+
+# Create and save Violin plot for RPKM
+
+op <- par(mar=c(8, 4, 2, 2))
+vioplot( RPKM, col =c(rep("orange", 3), rep("lightblue", 3)))
+legend("topleft", c("Ctr", "KO"), fill =c ("orange", "lightblue"))
+
+png("RPKM_Vioplot.png",width =1000, height=1000)
+print(vioplot( RPKM, col =c(rep("orange", 3), rep("lightblue", 3)), main ="RPKM Distribution for HEK293 with Pyruvate Kinase Knockdown" ))
+legend("topleft", c("Ctr", "KO"), fill =c ("orange", "lightblue"))
+dev.off()
+
+
+# Quantile normalization of RPKM values
+
+RPKM.norm <- round( normalize.quantiles(as.matrix(RPKM)), d=1)
+colnames(RPKM.norm) <- colnames(RPKM)
+rownames(RPKM.norm) <- rownames(RPKM)
+
+op <- par(mar=c(8, 4, 2, 2))
+vioplot( RPKM.norm, col =c(rep("orange", 3), rep("lightblue", 3)))
+legend("topleft", c("Ctr", "KO"), fill =c ("orange", "lightblue"))
+
+# Create and save Violin plot for RPKM
+
+png("RPKM.norm_Vioplot.png",width =1000, height=1000)
+print( vioplot( RPKM.norm, col =c(rep("orange", 3), rep("lightblue", 3)),main ="RPKM.norm Distribution for HEK293 with Pyruvate Kinase Knockdown"))
+legend("topleft", c("Ctr", "KO"), fill =c ("orange", "lightblue"))
+dev.off()
+
+write.table(RPKM.norm, "RPKM.norm.txt", sep="\t", quote=FALSE)
+
+
+# Log2 transformation of normalized RPKM
+
+RPKM.l2 <- round(log2(RPKM.norm), d=1)
+RPKM.l2[RPKM.l2 < 0] <- 0
+
+op <- par(mar=c(8, 4, 2, 2))
+vioplot( RPKM.l2, col =c(rep("orange", 3), rep("lightblue", 3)))
+legend("topleft", c("Ctr", "KO"), fill =c ("orange", "lightblue"))
+
+png("RPKM.norm_Vioplotlog2.png",width =1000, height=1000)
+print(vioplot( RPKM.l2, col =c(rep("orange", 3), rep("lightblue", 3)),main ="RPKM.normLog2 Distribution for HEK293 with Pyruvate Kinase Knockdown" ))
+legend("topleft", c("Ctr", "KO"), fill =c ("orange", "lightblue"))
+dev.off()
+
+write.csv (RPKM.l2, "RPKM.norm.log2.csv", quote =FALSE)
+
+hist(RPKM.l2[, 1])
+
+png("RPKM.norm_Histlog2.png",width =1000, height=1000)
+print(hist(RPKM.l2[, 1], xlab= " Level of Expression", ylab=" Exons by Genes(arranged by ID number)", main="Reads Distribution in SRR24971804") )
+dev.off()
+
+
+
+######################## Here is the deseq assay ###########################
+
+
+# Differentially expressed genes assayed by DESeqseq
+
+# Open raw data
+
+"C:\Shared-copying files\Assayfor HEK data\readcount.raw.txt"
+
+counts <-read.csv("C:/Shared-copying files/Assayfor HEK data/readcount.raw.txt", sep="\t", header = TRUE)
+
+counts <- counts[which(rowSums(counts) > 30), ]
+
+
+# Prepare data frame, plus experient conditions
+condition <- factor ( c( "Ctr", "Ctr" , "Ctr",  "KO", "KO", "KO"))
+
+coldata <- data.frame(row.names = colnames(counts),condition)
+
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = coldata, design= ~condition)
+
+# Extracting and analyzing data
+dds <-DESeq(dds)
+
+# Above dds data is a branch point for PCA analysis, for significance assay, and for mat's z score for heatmap 
+vsdata <- vst(dds, blind=FALSE)
+
+plotPCA(vsdata, intgroup="condition")
+
+plotDispEsts(dds)
+
+res <- results( dds, contrast= c ( "condition", "KO", "Ctr"))
+
+sigs <-na.omit(res)
+
+sigs <- sigs[ sigs$padj <0.05,]
+
+write.table(sigs, "results_by_DESeq.txt", sep="\t", quote = FALSE)
+
+
+# Making data as data frame
+
+sigs.df <- as.data.frame(sigs) # compare to sigs, the sigs.df seems to move out the "numeric" lab, and become a real dataframe
+
+write.csv( sigs.df, "sigs.df_no_foldSelection.csv", quote = FALSE)
+
+write.table(sigs.df, "sigs.df_no_foldSelection.txt", sep = "\t", quote = FALSE)
+
+sigs.df <- sigs.df[(sigs.df$baseMean > 100) & (abs(sigs.df$log2FoldChange) > 1.1), ]
+
+write.csv( sigs.df, "sigs.df_selection.csv", sep="\t", quote = FALSE)
+
+write.table(sigs.df, "sigs.df_selection.txt", sep = "\t", quote = FALSE)
+
+sigs.df$symbol <- mapIds(org.Hs.eg.db, keys =rownames(sigs.df), keytype ="ENSEMBL", column="SYMBOL")
+
+sigs.df[1:10,] 
+
+mat <- counts(dds, normalized = T)[rownames(sigs.df),]
+
+
+# See z score value to narmalize data
+mat_z <- t(apply(mat, 1, scale))  # here scale is z score to normalize raw data before doing heatmap 
+
+colnames(mat_z) <- rownames(coldata) # it seems that samples srr name added back after z-score test
+
+h <- Heatmap(mat_z, cluster_rows=T, cluster_columns=T, column_labels = colnames(mat_z), 
+         name ='Z-score', row_labels =  sigs.df[rownames(mat_z), ]$symbol)
+
+
+png("HEK_heat_map.png", res=250,width =1000, height=2000)
+print(h)
+dev.off()
+
+
+# Making volcano figure
+res <- results( dds, contrast= c ( "condition", "KO", "Ctr"))
+
+res.df <-as.data.frame(res)
+res.df$symbol <- mapIds(org.Hs.eg.db, keys =rownames(res.df), keytype = "ENSEMBL", column= "SYMBOL")
+
+res.df
+
+vocano <- EnhancedVolcano(res.df, x="log2FoldChange", y="padj", lab=res.df$symbol,
+                pCutoff =1e-4, FCcutoff=1)
+				
+png("HEK_volcano.png", width = 1500, height = 1000)		
+
+print(vocano)
+dev.off()
+
+# David function cluster analysis by uploading data to https://david.ncifcrf.gov/tools.jsp
+
+
